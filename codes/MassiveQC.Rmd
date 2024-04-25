@@ -1,0 +1,1909 @@
+---
+title: "MassiveQC"
+author: "shimw"
+date: "2024-04-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/home/shimw/project/MassiveQC/")
+library(data.table)
+library(dplyr)
+```
+
+此项目为毕业论文的代码，其中分别对应了各张图
+本文档中R代码放在前面，python代码放在之后
+原始count文件存放路径为`/NAS/chenlab/SRA/`
+工作路径与中间和结果文件存放路径为`/home/shimw/project/MassiveQC/`
+
+
+## 模型效果检测
+
+图3-6
+
+```{r}
+library(readxl)
+library(dplyr)
+
+srrs = readr::read_csv("./data/GES60314_meta.csv")
+
+GSEtime = readr::read_table("./data/GES60314_time.txt",col_names = c("srr","time"))
+GSEtime = left_join(GSEtime,srrs[,c("Run","Bytes")], by = c("srr"="Run"))
+GSEtime = GSEtime %>% group_by(srr)  %>% slice( 1 )
+GSEtime$`Size (Mb)` = GSEtime$Bytes/(1024*1024)
+
+# GSEtime$time
+library("scales")
+library("lubridate")
+library("ggplot2")
+
+GSEtime$time = as.numeric(GSEtime$time)/3600
+# median(GSEtime$`Size (Mb)`)
+
+# density(GSEtime$time)
+MaxY1_index <- which.max(density(GSEtime$time)$y)
+
+ggplot(as.data.frame(GSEtime), aes(time)) + 
+  geom_density(color= "#d88c9a")+
+  geom_vline(xintercept = density(GSEtime$time)$x[MaxY1_index],linetype="dashed")+
+  theme_classic()+
+  xlab("Run time (minutes)")+ylab("Density")+
+  theme(axis.text.x = element_text(size = 13 , color = 'black'),
+        axis.text.y = element_text(size = 13, color = 'black'),
+        axis.title.x=element_text(size=15),
+        axis.title.y=element_text(size=15),
+        # 加粗坐标轴
+        panel.grid = element_blank() # 删除网格线
+  )
+
+ggsave("./results/fig3-6A.pdf",height = 3.7,width = 4.1)
+
+
+MaxY2_index <- which.max(density(GSEtime$`Size (Mb)`)$y)
+ggplot(as.data.frame(GSEtime), aes(`Size (Mb)`)) + 
+  geom_density(color= "#99c1b9")+
+  geom_vline(xintercept = density(GSEtime$`Size (Mb)`)$x[MaxY2_index],linetype="dashed")+
+  theme_classic()+
+  ylab("Density")+
+  theme(axis.text.x = element_text(size = 13 , color = 'black'),
+        axis.text.y = element_text(size = 13, color = 'black'),
+        axis.title.x=element_text(size=15),
+        axis.title.y=element_text(size=15),
+        # 加粗坐标轴
+        panel.grid = element_blank() # 删除网格线
+  )+
+  scale_x_continuous(breaks=c(0,339,1000,2000,3000))
+ggsave("./results/fig3-6B.pdf",height = 3.7,width = 4.1)
+
+
+
+stat.Accuracy = readr::read_csv("./data/stat.csv")
+
+
+stat.Accuracy = stat.Accuracy %>% group_by(Num_contamination)%>% summarise("mean_accuracy" = mean(Accuracy))
+
+ggplot(stat.Accuracy, aes(x=Num_contamination, y=mean_accuracy)) +
+  geom_line(color="#db7c26") + geom_point(color="#db7c26")+
+  theme_classic()+
+  ylab("Accuracy")+xlab("Number of contamination")+
+  theme(axis.text.x = element_text(size = 13 , color = 'black'),
+        axis.text.y = element_text(size = 13, color = 'black'),
+        axis.title.x=element_text(size=15),
+        axis.title.y=element_text(size=15),
+        # 加粗坐标轴
+        panel.grid = element_blank() # 删除网格线
+  )+
+  scale_x_continuous(breaks=c(5,10,15,20,25,30))+
+  scale_y_continuous(breaks=c(0,0.2,0.4,0.6,0.8,1),limits = c(0,1.1))
+ggsave("./results/fig3-6C.pdf",height = 3.7,width = 4.1)
+
+
+sample.Accuracy = readr::read_csv("./data/sample_stat.csv")
+aa=sample.Accuracy[sample.Accuracy$Num_sample==400,]
+sample.Accuracy = sample.Accuracy %>% 
+  group_by(Num_sample)%>%
+  summarise("prob" = mean(Accuracy),sd = sd(Accuracy))
+
+
+ggplot(sample.Accuracy, aes(x=Num_sample, y=prob)) +
+  geom_line(color="#669bbc") + geom_point(color="#669bbc")+
+  geom_errorbar(aes(ymin=prob-sd, ymax=prob+sd), width=10,color="#669bbc")+
+  theme_classic()+
+  ylab("Accuracy")+xlab("Number of samples")+
+  theme(axis.text.x = element_text(size = 13 , color = 'black'),
+        axis.text.y = element_text(size = 13, color = 'black'),
+        axis.title.x=element_text(size=15),
+        axis.title.y=element_text(size=15),
+        # 加粗坐标轴
+        panel.grid = element_blank() # 删除网格线
+  )+
+  scale_x_continuous(breaks=c(0,100,200,300,400,500,600,700,800))+
+  scale_y_continuous(breaks=c(0,0.2,0.4,0.6,0.8,1),limits = c(0,1.1))
+ggsave("./results/fig3-6D.pdf",height = 3.7,width = 4.1)
+
+```
+
+
+
+## 表达矩阵处理
+
+这里将删除count少于2000000的样本，并对gene count进行fpkm计算
+
+```{r}
+#read count matrix
+gene_count<-fread("./data/GSE117217_gene_counts.tsv") %>% as.data.frame()
+rownames(gene_count)=gene_count[,1]
+gene_count<-gene_count[,-1]
+# retained counts > 2000000
+gene_hist_table<-data.frame(count=apply(gene_count,2,sum), sample=colnames(gene_count))#calculate reads count for each sample
+retain_by_count<-gene_count[,gene_hist_table$sample[gene_hist_table$count>2000000]]#remove samples with <2000000 reads
+rm(gene_hist_table)
+# calculate fpkm
+# aquire gene exon length
+gene_exon_length<-read.table("./data/dmel_r6.11.exonlength",col.names = c("gene_id","length"))
+gene_exon_length<-gene_exon_length%>%group_by(gene_id)%>%summarise(length=sum(length))%>%as.data.frame()
+rownames(gene_exon_length)=gene_exon_length$gene_id
+gene_id<-intersect(gene_exon_length$gene_id,rownames(retain_by_count)) #"FBgn0027554" not in annotation
+retain_by_count<-retain_by_count[gene_id,]
+gene_exon_length<-gene_exon_length[gene_id,]
+# calculate fpkm
+totalcounts<-colSums(retain_by_count)
+fpkm <- t(do.call(rbind, lapply(1:length(totalcounts),function(i){10^9*retain_by_count[,i]/gene_exon_length$length/totalcounts[i]}))) %>% as.data.frame()
+colnames(fpkm)=colnames(retain_by_count)
+rownames(fpkm)=rownames(retain_by_count)
+# write.table(fpkm,"./data/fpkm")
+
+
+```
+
+
+## 数据总结
+图3-8
+```{r}
+tissue_info<-read.csv("./data/broad_tissue_stage.csv")
+tissue_plot_info<-tissue_info[,c("broad_tissue","broad_stage")]
+tissue_plot_info[grep("oogenesis|spermatogenesis",tissue_plot_info$broad_stage),"broad_stage"]="egg"
+plotdata <- tissue_plot_info%>%group_by(broad_tissue,broad_stage)%>%
+  summarise(num = n())
+sum<-sum(plotdata$num)
+plotdata$perc=plotdata$num/sum
+tissue_freq<-as.data.frame(table(plotdata$broad_tissue))
+for (i in 1:nrow(plotdata)) {
+  plotdata[i,"ymin"]=sum(plotdata$perc[1:i-1])
+  plotdata[i,"ymax"]=sum(plotdata$perc[1:i])
+}
+plotdata[grep("egg",plotdata$broad_stage),"level"]=0.1
+plotdata[grep("embryo",plotdata$broad_stage),"level"]=0.2
+plotdata[grep("larva",plotdata$broad_stage),"level"]=0.3
+plotdata[grep("prepupae",plotdata$broad_stage),"level"]=0.4
+plotdata[grep("pupae",plotdata$broad_stage),"level"]=0.5
+plotdata[grep("adult",plotdata$broad_stage),"level"]=0.6
+
+plotdata$broad_tissue<-as.factor(plotdata$broad_tissue)
+
+tissue_summary <- tissue_plot_info%>%group_by(broad_tissue)%>%
+  summarise(sum = n())
+plotdata<-merge(plotdata,tissue_summary,by="broad_tissue")
+plotdata$broad_tissue=paste(plotdata$broad_tissue," (",plotdata$sum,")",sep = "")
+ggplot(plotdata) + 
+  geom_rect(aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3,alpha=level), fill = "#174e93") + 
+  geom_rect(aes(fill=broad_tissue, ymax=ymax, ymin=ymin, xmax=3, xmin=2)) + 
+  xlim(c(0, 4)) + 
+  theme(aspect.ratio=1)+
+  coord_polar(theta="y")+
+  theme_void()+
+  scale_fill_manual(values = c("#35212e","#562e3c","#a14462","#eb998b",
+                               "#fddbc8","#42465c","#356d67","#4c9568",
+                               "#F39B7FB2","#b0d45d","#ffe788","#6B6B83",
+                               "#654EA3","grey29","#F7797D","#cca69c",
+                               "#5066a1","#76afda","#abddff","#dcf2ff",
+                               "#e8743c","#ffc556","#2873B3","#2EBEBE",
+                               "#74B346","#167153","#99F2C8","#7D4444",
+                               "#A14462","#3B8D99","#b0d45d"))+
+  guides(fill=guide_legend(title = "tissue"))+
+  labs(alpha="stage")
+
+```
+
+## 批次效应处理
+图3-9
+```{r}
+rm(list=ls())
+#read in fpkm table
+fpkm<-fread("./data/fpkm") %>% as.data.frame()
+rownames(fpkm)=fpkm$V1
+fpkm<-fpkm[,-1]
+#read in batch infomation
+batch<-read.csv("./data/metadata.csv",stringsAsFactors = FALSE,row.names = 1)
+#Keep the samples of the two files consistent
+fpkm<-fpkm[,batch$curr_SRX]
+library(sva)
+#debatch
+batch$group=paste(paste(batch$cell_line,batch$broad_stage,sep = ""),batch$broad_tissue,sep = "_")
+debatched_fpkm<-data.frame(row.names = rownames(fpkm))
+batch_summary<-batch%>%group_by(group)%>%summarise(batch_n=length(unique(study)))
+debatch_groups<-as.data.frame(subset(batch_summary,batch_summary$batch_n!=1))
+# for (i in 1:nrow(debatch_groups)) {
+#   temp_batch<-subset(batch,batch$group==debatch_groups[i,"group"])
+#   temp_fpkm<-fpkm[,temp_batch$curr_SRX]
+#   unfilter_df = ComBat(temp_fpkm, batch = temp_batch$study)
+#   debatched_fpkm<-cbind(debatched_fpkm,unfilter_df)
+# }
+# debatched_fpkm<-cbind(debatched_fpkm,fpkm[,setdiff(batch$curr_SRX,colnames(debatched_fpkm))])
+# write.table(debatched_fpkm,"./data/debatched_fpkm")
+# knit运行太久，且其输出的log信息过于长了，因此注释这段，表格已经生成了
+
+library(data.table)
+debatched_fpkm<-fread("./data/debatched_fpkm") %>% as.data.frame()
+rownames(debatched_fpkm)=debatched_fpkm[,1]
+debatched_fpkm<-debatched_fpkm[,-1]
+
+#fpkm
+fpkm<-fread("./data/fpkm") %>% as.data.frame()
+rownames(fpkm)=fpkm$V1
+fpkm<-fpkm[,-1]
+#metadata
+metadata<-read.csv("./data/metadata.csv",stringsAsFactors = FALSE,row.names = 1)
+#whole_body
+whole_body<-subset(metadata,metadata$broad_tissue=="whole body")
+whole_body_fpkm<-fpkm[,whole_body$curr_SRX]
+whole_body_debatched_fpkm<-debatched_fpkm[,whole_body$curr_SRX]
+#fpkm
+library(umap)
+fpkm_umap<-umap(t(whole_body_fpkm))
+fpkm_umap_plot=as.data.frame(fpkm_umap$layout)
+colnames(fpkm_umap_plot)=c("UMAP_1","UMAP_2")
+fpkm_umap_plot$broad_stage=whole_body$broad_stage
+fpkm_umap_plot$broad_stage=factor(fpkm_umap_plot$broad_stage,levels = c("egg","embryo","larva","pupa","adult"),labels=c("Egg","Embyro","Larva","Pupa","Adult"))
+ggplot(fpkm_umap_plot,aes(UMAP_1,UMAP_2,color=broad_stage))+geom_point()+
+  theme_classic()+
+  theme(axis.title.x=element_text(size=18), 
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 16))+
+  guides(color=guide_legend(title="Stage"))
+ggsave("./results/plot/fig3-9A.pdf",device = "pdf",width=6,height = 4.5)
+
+#debatched_fpkm
+debatched_fpkm_umap<-umap(t(whole_body_debatched_fpkm))
+debatched_fpkm_umap_plot=as.data.frame(debatched_fpkm_umap$layout)
+colnames(debatched_fpkm_umap_plot)=c("UMAP_1","UMAP_2")
+debatched_fpkm_umap_plot$broad_stage=whole_body$broad_stage
+debatched_fpkm_umap_plot$broad_stage=factor(debatched_fpkm_umap_plot$broad_stage,levels = c("egg","embryo","larva","pupa","adult"),labels=c("Egg","Embyro","Larva","Pupa","Adult"))
+ggplot(debatched_fpkm_umap_plot,aes(UMAP_1,UMAP_2,color=broad_stage))+geom_point()+
+  theme_classic()+
+  theme(axis.title.x=element_text(size=18), 
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 16))+
+  guides(color=guide_legend(title="Stage"))
+ggsave("./results/plot/fig3-9B.pdf",device = "pdf",width=6,height = 4.5)
+
+```
+
+
+## seurat降维可视化距离
+
+图3-10 图3-13A  图3-15AB
+```{r}
+library(dplyr)
+library(Matrix, lib.loc = "/home/wangdy/R/x86_64-pc-linux-gnu-library/4.2") # 必须使用1.6.1
+library(Seurat, lib.loc = "/home/wangdy/R/x86_64-pc-linux-gnu-library/4.2/") #版本4.4.0。 不能更新seurat，更新后ScaleData报错
+library(patchwork, lib.loc = "/home/wangdy/R/x86_64-pc-linux-gnu-library/4.2/")
+library(data.table)
+#prepare data
+metadata<-read.csv("./data//metadata.csv",stringsAsFactors = FALSE,row.names = 1)
+cl_rows<-which(is.na(metadata$cell_line)==FALSE)
+metadata[cl_rows,"sex"]="cell line"
+metadata[cl_rows,"broad_tissue"]="cell line"
+metadata[cl_rows,"broad_stage"]="cell line"
+
+debatched_fpkm<-fread("./data/debatched_fpkm") %>% as.data.frame()
+rownames(debatched_fpkm)=debatched_fpkm[,1]
+debatched_fpkm<-debatched_fpkm[,-1]
+debatched_fpkm<-debatched_fpkm[,metadata$curr_SRX]
+debatched_fpkm<-fread("./data/debatched_fpkm") %>% as.data.frame()
+rownames(debatched_fpkm)=debatched_fpkm[,1]
+debatched_fpkm<-debatched_fpkm[,-1]
+
+#seurat
+pmbc<-CreateSeuratObject(counts=debatched_fpkm,project="rna_seq")
+pmbc@meta.data$sex<-metadata$sex
+pmbc@meta.data$broad_tissue<-metadata$broad_tissue
+pmbc@meta.data$broad_stage<-metadata$broad_stage
+pmbc@meta.data$study<-metadata$study
+
+
+#Scaling the data
+all.genes<-rownames(pmbc)
+pmbc<-FindVariableFeatures(pmbc,selection.method="vst")
+pmbc<-ScaleData(pmbc,features=all.genes)
+#Perform linear dimensional reduction
+pmbc<-RunPCA(pmbc)
+pmbc <- FindNeighbors(pmbc, dims = 1:50)
+pmbc <- FindClusters(pmbc, resolution = 0.1)
+
+#UMAP
+pmbc <- RunUMAP(pmbc, label = TRUE, dims = 1:50)
+
+# pdf("./results/plot/fig3-15A.pdf",width = 5,height = 4)
+FeaturePlot(pmbc,"FBgn0033450",min.cutoff = 0, max.cutoff = 200,pt.size=0.4)#,min.cutoff = 0, max.cutoff = 2000
+# dev.off()
+# pdf("./results/plot/fig3-15D.pdf",width = 5,height = 4)
+FeaturePlot(pmbc,"FBgn0000559",min.cutoff = 0, max.cutoff =1000,pt.size=0.2)
+# dev.off()
+
+#cluster by batch
+pmbc@meta.data$seurat_clusters<-as.character(pmbc@meta.data$study)
+pmbc@meta.data$seurat_clusters<-as.factor(pmbc@meta.data$study)
+pmbc@active.ident<-pmbc@meta.data$seurat_clusters
+debatch_umap<-DimPlot(pmbc, reduction = "umap",pt.size=0.1,label = FALSE)
+# pdf("./results/plot/kkkk.pdf",width = 50,height = 10)
+debatch_umap
+# dev.off()
+
+#clustered by tissue
+pmbc@meta.data$seurat_clusters<-as.character(pmbc@meta.data$broad_tissue)
+pmbc@meta.data$seurat_clusters<-as.factor(pmbc@meta.data$broad_tissue)
+pmbc@active.ident<-pmbc@meta.data$seurat_clusters
+tissue_umap<-DimPlot(pmbc, reduction = "umap", label = TRUE)
+# pdf("./results/plot/fig3-10A.pdf",width = 14,height = 10)
+tissue_umap
+# dev.off()
+
+#clustered by stage
+pmbc@meta.data$seurat_clusters<-as.character(pmbc@meta.data$broad_stage)
+pmbc@meta.data$seurat_clusters<-factor(pmbc@meta.data$broad_stage,levels=c("egg","embryo","larva","pupa","adult","cell_line"))
+pmbc@active.ident<-pmbc@meta.data$seurat_clusters
+stage_umap<-DimPlot(pmbc, reduction = "umap", label = FALSE)
+# pdf("./results/plot/fig3-10B.pdf",width = 7,height = 5)
+stage_umap
+# dev.off()
+
+#clustered by sex
+pmbc@meta.data$seurat_clusters<-as.character(pmbc@meta.data$sex)
+pmbc@meta.data$seurat_clusters<-as.factor(pmbc@meta.data$sex)
+pmbc@active.ident<-pmbc@meta.data$seurat_clusters
+sex_umap<-DimPlot(pmbc, reduction = "umap",label = FALSE)
+# pdf("./results/plot/fig3-10C.pdf",width = 7,height = 5)
+sex_umap
+# dev.off()
+
+
+
+#Extract the list of highly variable genes
+meta_features<-pmbc[["RNA"]]@meta.features
+# write.table(meta_features,"./results/result_table/seurat_variant_table")
+
+
+
+#find high-variable gene
+pmbc<-FindVariableFeatures(pmbc,selection.method="vst",nfeatures = 3)# 取三个用来画图
+#high variable gene plot
+top10 <- head(VariableFeatures(pmbc), 3)
+#plot variable features with and without labels
+plot1 <- VariableFeaturePlot(pmbc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+# pdf("./results/plot/fig3-13A.pdf",width = 6,height = 4.5)
+# 注意Rmd中无法使用pdf生成图像，报错无法shut down画图面板的错误
+plot2
+# dev.off()
+
+```
+
+## 表达模式分析
+fig3-11 fig3-12 fig3-13B
+
+```{r}
+
+debatched_fpkm<-fread("./data/debatched_fpkm") %>% as.data.frame()
+rownames(debatched_fpkm)=debatched_fpkm$V1
+debatched_fpkm<-debatched_fpkm[,-1]
+sample<-as.data.frame(apply(debatched_fpkm, 2,function(x){sum(x>1)}))
+colnames(sample)="expressed_gene"
+sample<-subset(sample,sample$expressed_gene>5000)
+debatched_fpkm<-debatched_fpkm[,rownames(sample)]
+detect<-as.data.frame(apply(debatched_fpkm, 1,function(x){sum(x>1)}))
+colnames(detect)="count"
+expressed_detect<-subset(detect,detect$count>2)
+expressed_detect$detect_ratio=expressed_detect$count/12026
+ggplot(expressed_detect, aes(x=detect_ratio)) +
+  geom_histogram(binwidth = 0.005,color="indianred",fill="indianred", alpha=0.7, position = 'identity')+
+  theme_classic()+
+  ylab("Count")+
+  xlab("Gene detection rate")+
+  theme(axis.title.x=element_text(size=18),
+        axis.title.y=element_text(size=18),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16),
+        legend.title = element_blank())
+ggsave(filename = "./results/plot/fig3-11",device = "pdf",width = 5,height = 4.5)
+
+or_gene<-read.table("./data/Or_FlyBase_IDs.txt")[,1]
+fpkm<-fread("./data/001.2.14kwithSaminfor.FPKM.txt",stringsAsFactors = FALSE)%>%as.data.frame()
+rownames(fpkm)=fpkm$V1
+fpkm<-fpkm[,-1]
+
+or_fpkm<-fpkm[or_gene,]
+# table(ifelse(apply(or_fpkm, 1, max)>1,"expressed","UN"))
+or_expressed_ratio<-apply(or_fpkm,1,function(x){sum(x>1)/length(x)})
+or_expressed_SRX<-data.frame(ratio=apply(or_fpkm,2,function(x){sum(x>1)/length(x)}),SRX=colnames(or_fpkm))
+tissue_stage<-read.table("./data/tissue_stage",header = T)
+or_expressed_SRX<-merge(or_expressed_SRX, tissue_stage, by.x="SRX",by.y = "curr_SRX")
+
+##############head##############
+library(bootstrap)
+or_head_SRX<-subset(or_expressed_SRX,or_expressed_SRX$broad_tissue=="head")
+head_saturation_curve<-data.frame(sample_size=0,mean=0,sd1=0,sd2=0)
+for (i in seq(10,2180,10)) {
+  theta<-function(x){max(sample(x,i))}
+  result<-bootstrap(or_head_SRX$ratio,1000,theta)$thetastar
+  head_saturation_curve[nrow(head_saturation_curve)+1,"sample_size"]=i
+  head_saturation_curve[nrow(head_saturation_curve),"mean"]=mean(result)
+  head_saturation_curve[nrow(head_saturation_curve),"sd1"]=mean(result)-sd(result)
+  head_saturation_curve[nrow(head_saturation_curve),"sd2"]=mean(result)+sd(result)
+}
+ggplot(head_saturation_curve,aes(sample_size,mean))+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(aes(ymin=sd2,ymax=sd1))+
+  scale_y_continuous(labels = scales::percent)+
+  theme_classic()+
+  xlab("Sample size")+
+  ylab("Detectable rate")+
+  theme(axis.text = element_text(size = 15),
+        axis.title = element_text(size = 20),
+        plot.margin = margin(t=20,r=20,b=10,l=10))
+ggsave(filename = "./results/plot/fig3-12",device = "pdf",width = 5,height = 4.5)
+
+
+library(data.table)
+debatched_fpkm<-fread("./data/debatched_fpkm") %>% as.data.frame()
+rownames(debatched_fpkm)=debatched_fpkm[,1]
+debatched_fpkm<-debatched_fpkm[,-1]
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+debatched_fpkm<-debatched_fpkm[rownames(expressed_detect),]
+metadata<-read.csv("./data/metadata.csv",row.names = 1)
+metadata$group=paste(metadata$broad_stage,metadata$broad_tissue,sep = "_")
+metadata<-subset(metadata,metadata$broad_tissue!="tissue carcass"&metadata$broad_tissue!="multiple tissue")
+debatched_fpkm<-debatched_fpkm[,metadata$curr_SRX]
+tau <- function(x){
+  ncol=ncol(x)
+  x <- x[apply(x, 1, function(y)sum(y >0.1 )>=1),]
+  x$max=apply(x[,1:ncol],1,max)
+  x$tissue=colnames(x[,1:ncol])[apply(x[,1:ncol],1,which.max)]
+  x$tau=apply(1-x[,1:ncol]/x$max,1,sum)/(ncol-1)
+  return(as.data.frame(x))
+}
+debatched_tau <- tau(debatched_fpkm)
+total_tau<-data.frame(gene_id=rownames(debatched_tau),tissue=debatched_tau$tissue,tau=debatched_tau$tau)
+total_tau$broad_tissue=metadata[total_tau$tissue,"group"]
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+total_tau$standard.variant=variant_table[total_tau$gene_id,"vst.variance.standardized"]
+cor<-cor.test(total_tau$tau,total_tau$standard.variant,method = "spearman")
+
+ggplot(total_tau,mapping = aes(x = tau, y = log2(standard.variant)))+geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  xlab("Expression specificity (tau value)")+
+  ylim(-6,8)+
+  theme(axis.title.x=element_text(size=18), 
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  geom_smooth(method = "lm",colour="black")+
+  annotate("text", x=0.7, y=5, label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)),size=6)
+ggsave(filename = "./results/plot/fig3-13B",device = "pdf",width = 5,height = 4.5)
+
+
+```
+热图 图3-14
+```{r}
+rm(list= ls())
+gc()
+#debatched fpkm
+debatched_fpkm<-fread("./data/debatched_fpkm") %>% as.data.frame()
+rownames(debatched_fpkm)=debatched_fpkm$V1
+debatched_fpkm<-debatched_fpkm[,-1]
+sample<-as.data.frame(apply(debatched_fpkm, 2,function(x){sum(x>1)}))
+colnames(sample)="expressed_gene"
+sample<-subset(sample,sample$expressed_gene>5000)
+debatched_fpkm<-debatched_fpkm[,rownames(sample)]
+
+
+##Correlation 
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+expressed_detect$variance.sd<-variant_table[rownames(expressed_detect),"vst.variance.standardized"]
+cor<-cor.test(expressed_detect$detect_ratio,expressed_detect$variance.sd,method = "spearman")
+ggplot(expressed_detect,mapping = aes(x = detect_ratio, y = log10(variance.sd+0.1)))+
+         geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  ylim(c(-1,2))+
+  theme_bw()+
+  ylab("log10 ( Standard variance )")+
+  xlab("Gene detection rate")+
+  theme(axis.text.x = element_text(size=15, hjust = 1, vjust = 1),
+        axis.text.y = element_text(size=15),
+        axis.title.x=element_text(size=17),
+        axis.title.y=element_text(size=17),
+        legend.text=element_text(size=15),
+        legend.title=element_text(size=17),
+        title = element_text(size = 17))+
+  geom_smooth(method = "lm",linetype=1,colour="blue")+
+  annotate("text", x=0.8, y=1.8, label="Spearman correlation\n Rho=-0.57, P<2.2e-16",size=5)
+
+##
+expressed_detect<-expressed_detect[order(expressed_detect$variance.sd,decreasing = T),]
+dynamic_500<-head(rownames(expressed_detect),round(nrow(expressed_detect)*0.05))
+constraint_500<-tail(rownames(expressed_detect),round(nrow(expressed_detect)*0.05))
+dynamic_500_fpkm<-as.data.frame(t(debatched_fpkm[dynamic_500,]))
+constraint_500_fpkm<-as.data.frame(t(debatched_fpkm[constraint_500,]))
+metadata<-read.csv("./data/metadata.csv",row.names = 1)
+metadata$group=paste(metadata$broad_tissue,metadata$broad_stage,metadata$sex,sep = "_")
+cell_line<-which(is.na(metadata[,"broad_stage"]==TRUE))
+metadata<-metadata[-cell_line,]
+metadata<-metadata[grep("unknown|carcass|multiple|intersex",metadata$group,invert = TRUE),]
+
+
+
+dynamic_500_fpkm<-dynamic_500_fpkm[intersect(rownames(dynamic_500_fpkm),rownames(metadata)),]
+metadata<-metadata[intersect(rownames(dynamic_500_fpkm),rownames(metadata)),]
+group_median<-apply(dynamic_500_fpkm,2,function(x){tapply(x,metadata$group,median)})
+group_median<-group_median[grep("mix",rownames(group_median),invert = T),]
+group_median<-as.data.frame(t(group_median[,which(apply(group_median, 2, max)>0)]))
+# pdf("./results/plot/fig3-14A.pdf",width = 10,height = 6)
+pheatmap::pheatmap(group_median,scale = "row",show_rownames = FALSE,angle_col = 90)
+# dev.off()
+
+constraint_500_fpkm<-constraint_500_fpkm[intersect(rownames(constraint_500_fpkm),rownames(metadata)),]
+metadata<-metadata[intersect(rownames(constraint_500_fpkm),rownames(metadata)),]
+group_median<-apply(constraint_500_fpkm,2,function(x){tapply(x,metadata$group,median)})
+group_median<-group_median[grep("mix",rownames(group_median),invert = T),]
+group_median<-as.data.frame(t(group_median[,which(apply(group_median, 2, max)>0)]))
+# pheatmap::pheatmap(group_median,scale = "row",show_rownames = FALSE,angle_col = 90)
+# pdf("./results/plot/fig3-14B.pdf",width = 10,height = 6)
+pheatmap::pheatmap(group_median,scale = "row",show_rownames = FALSE,angle_col = 90)
+# dev.off()
+```
+
+
+
+## 演化与调控分析
+
+### 基因年龄与动态性
+图3-16到图3-19
+```{r}
+#gene type
+library(ggpubr)
+library(ggsci)
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table$gene_id<-rownames(variant_table)
+type_length_table<-read.table("./data/type_length_table")
+variance_type<-merge(variant_table,type_length_table,by="gene_id")
+plot_table<-subset(variance_type,variance_type$gene_type=="protein-coding"|variance_type$gene_type=="lncRNA"|variance_type$gene_type=="pseudogene")
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+plot_table<-subset(plot_table,plot_table$gene_id%in%rownames(expressed_detect))
+
+my_comparisons = list(c("protein-coding","lncRNA"),c("pseudogene","lncRNA"),c("protein-coding","pseudogene"))
+plot_table$gene_type<-factor(plot_table$gene_type,levels = c("protein-coding","lncRNA","pseudogene"))
+ggplot(plot_table,aes(gene_type,log2(vst.variance.standardized+0.01),fill=gene_type))+
+  geom_boxplot()+
+  theme_classic()+ylab("Standardized expression variation (log2)")+
+  #guides(fill=guide_legend(title = "gene type"))+
+  xlab("")+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  scale_fill_aaas()+
+  scale_x_discrete(labels=c("Coding","LncRNA","Pseudogene"))+
+  stat_compare_means(comparisons = my_comparisons,label.y = c(9,10,11),size=5)+
+  theme(legend.position = 'none')
+ggsave(filename = "./results/plot/fig3-16.pdf",device = "pdf",width = 5,height = 4.5)
+
+# gene_age
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table$gene_id=rownames(variant_table)
+gene_age<-read.csv("./data/gene_age.csv")
+gene_age$gene_age<-as.numeric(gsub(">","",gene_age$gene_age))
+variant_table<-merge(variant_table,gene_age,by.x="gene_id",by.y = "ensembl_id")
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+variant_table<-subset(variant_table,variant_table$gene_id%in%rownames(expressed_detect))
+
+cor<-cor.test(variant_table$vst.variance.standardized,variant_table$gene_age,method = "spearman")
+ggplot(variant_table,mapping = aes(x = log2(gene_age), y = log2(vst.variance.standardized)))+geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  xlab("Gene age (Myr, log2)")+
+  theme(axis.title.x=element_text(size=18),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  annotate("text", x=10.5, y=6, label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)),size=6)+
+  geom_smooth(method = "lm",colour="black")+
+  scale_x_continuous(breaks = seq(0,12,2))
+ggsave(filename = "./results/plot/fig3-17.pdf",device = "pdf",width = 5,height = 4.5)
+
+# genorinage
+library(tidyverse)
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table$gene_id=rownames(variant_table)
+gentree_age<-readxl::read_xlsx("./data/dm6_ver78_age.xlsx")
+variant_table<-merge(variant_table,gentree_age,by.x = "gene_id",by.y = "gene")
+variant_table[variant_table$branch==0,"age_class"]="Older"
+variant_table[variant_table$branch!=0,"age_class"]="Younger"
+variant_table$age_class<-factor(variant_table$age_class,levels = c("Younger","Older"))
+
+library(rstatix)
+df_p_val <- variant_table%>%
+  wilcox_test(formula = vst.variance.standardized ~ age_class) %>% 
+  add_significance(p.col = 'p',cutpoints = c(0,0.001,0.01,0.05,1),symbols = c('***','**','*','ns')) %>%
+  add_xy_position()%>%
+  mutate(y.position=12)
+
+ggplot(variant_table,aes(x=age_class,y=vst.variance.standardized))+
+  geom_boxplot(aes(fill=age_class),outlier.alpha = 0,notch=TRUE)+
+  stat_pvalue_manual(data = df_p_val,label = '{p}',label.size=4,tip.length = 0,bracket.shorten = 0.1)+
+  ylim(0,15)+
+  scale_fill_manual(values=c("#8EE5EE","#53868B"))+
+  ylab("Standardized expression variation")+
+  xlab("")+
+  theme_classic()+
+  theme(axis.title.x=element_text(size=18), 
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16),
+        legend.position = 'none')
+ggsave(filename = "./results/plot/fig3-18.pdf",device = "pdf",width = 5,height = 4.5)
+
+# age tissue
+
+debatched_fpkm<-fread("./data/debatched_fpkm")%>%as.data.frame()
+rownames(debatched_fpkm)=debatched_fpkm$V1
+debatched_fpkm<-debatched_fpkm[,-1]
+metadata<-read.csv("./data/metadata.csv")
+adult_fpkm<-debatched_fpkm[,intersect(colnames(debatched_fpkm),metadata[which(metadata$broad_stage=="adult"),"curr_SRX"])]#只考虑校对信息后的样本（未考虑cell line）
+adult_expressed_gene<-data.frame(expressed_gene=apply(adult_fpkm[grep("FBgn",rownames(adult_fpkm)),], 2, function(x){sum(x>1)}))#统计adult样本表达基因的数目(fpkm>1)
+adult_expressed_gene[,"sample_id"]=rownames(adult_expressed_gene)
+adult_expressed_gene<-merge(adult_expressed_gene,metadata[,c(2,4,5,7)],by.x = "sample_id",by.y = "curr_SRX")
+#adult(组织分析先考虑adult)
+adult_expressed_gene[grep("sperm|accessory gland",adult_expressed_gene$broad_tissue),"broad_tissue"]="testis"#将sperm和accessory gland都看作testis
+adult_expressed_gene[grep("brain",adult_expressed_gene$broad_tissue),"broad_tissue"]="head"#brain归类到head
+adult_expressed_gene<-subset(adult_expressed_gene,adult_expressed_gene$broad_tissue!="unknown"&adult_expressed_gene$broad_tissue!="tissue carcass"&adult_expressed_gene$broad_tissue!="multiple tissue"&adult_expressed_gene$broad_tissue!="whole body"&adult_expressed_gene$broad_tissue!="abdomen"&adult_expressed_gene$broad_tissue!="thorax"&adult_expressed_gene$broad_tissue!="digestive system")#除去unknown/carcass/multiple tissue/whole body/abdomen/thorax
+adult_quantile_table <- adult_expressed_gene%>%group_by(broad_tissue)%>%summarise(quantile25=quantile(expressed_gene)[2],quantile50=quantile(expressed_gene)[3],quantile75=quantile(expressed_gene)[4])#计算各组织样本中，表达基因数目的25，median，75分位数
+adult_tissue_freq<-as.data.frame(table(adult_expressed_gene$broad_tissue))
+colnames(adult_tissue_freq)=c("broad_tissue","freq")
+adult_quantile_table<-merge(adult_quantile_table,adult_tissue_freq,by="broad_tissue")
+
+adult_tissue_fpkm<-adult_fpkm[,adult_expressed_gene$sample_id]
+adult_tissue_fpkm=as.data.frame(t(apply(adult_tissue_fpkm,1,function(a){tapply(a,adult_expressed_gene$broad_tissue,median)})))#对组
+tau <- function(x){
+  ncol=ncol(x)
+  x <- x[apply(x, 1, function(y)sum(y >0.1 )>=1),]
+  x$max=apply(x[,1:ncol],1,max)
+  x$tissue=colnames(x[,1:ncol])[apply(x[,1:ncol],1,which.max)]
+  x$tau=apply(1-x[,1:ncol]/x$max,1,sum)/(ncol-1)
+  return(as.data.frame(x))
+}
+adult_tissue_tau <- tau(adult_tissue_fpkm)
+adult_tau<-data.frame(gene_id=rownames(adult_tissue_tau),tissue=adult_tissue_tau$tissue,tau=adult_tissue_tau$tau)
+type_length_table<-read.table("./data/type_length_table")
+adult_tau_gene_type<-merge(adult_tau,type_length_table[,c(1,2)],by="gene_id")
+plot_table<-subset(adult_tau_gene_type,adult_tau_gene_type$gene_type=="protein-coding"|adult_tau_gene_type$gene_type=="lncRNA"|adult_tau_gene_type$gene_type=="pseudogene"|adult_tau_gene_type$gene_type=="intergenic")
+plot_table$gene_type<-factor(plot_table$gene_type,levels = c("protein-coding","lncRNA","pseudogene","intergenic"))
+
+gene_age<-read.csv("./data/gene_age.csv",stringsAsFactors = FALSE)[,-3]
+rownames(gene_age)=gene_age$ensembl_id
+gene_age[grep(">",gene_age$gene_age),"gene_age"]=4290
+gene_age$gene_age<-as.numeric(gene_age$gene_age)
+plot_table<-merge(plot_table,gene_age,by.x = "gene_id", by.y = "ensembl_id")
+plot_table<-subset(plot_table,plot_table$gene_type=="protein-coding")
+gene_age_freq<-as.data.frame(table(plot_table$gene_age))
+plot_table[which(plot_table$gene_age<100),"age"]="young (<100 myr) n=3359"
+plot_table[which(plot_table$gene_age>1000),"age"]="old (>1000 myr) n=2806"
+plot_table[which(is.na(plot_table$age)==TRUE),"age"]="middle (100-1000 myr) n=6922"
+plot_table$age<-factor(plot_table$age,levels = c("old (>1000 myr) n=2806","middle (100-1000 myr) n=6922","young (<100 myr) n=3359"))
+tissue_levels=c("head","mushroom body","wing","heart",
+                "testis","ovary","genitalia","gut","neuron","haltere",
+                "malpighian tubule","antennae","leg","fat body","retina","muscle")
+plot_table$tissue<-factor(plot_table$tissue,levels = tissue_levels[length(tissue_levels):1])
+tissue_color<-c("#008B45","#8B0A50","#CD5C5C","#D1EEEE",
+                "#4169E1","#FFFF00","#66CDAA","#8A91D0",
+                "#FFB6C1","tan4","#BDB76B","#808080",
+                "#FFA54F","#CD6090","#F5F5DC","#87CEFF")
+freq<-as.data.frame(table(plot_table$tissue))
+colnames(freq)=c("tissue","freq")
+rownames(freq)=freq$tissue
+freq<-freq[tissue_levels,]
+label<-paste(freq$tissue," (",freq$freq,")",sep = "")
+ggplot(data=plot_table, mapping=aes(x=age,fill=tissue))+
+  geom_bar(stat="count",width=0.5,position='fill')+
+  coord_flip()+
+  scale_fill_manual(values = tissue_color,limits=tissue_levels,labels=label)+
+  theme_pubclean()+
+  ylab("percentage")+
+  xlab("")+
+  labs(fill="Tissue")+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_text(size=18),
+        axis.text.x = element_text(size=16),#,angle = 45, hjust = 1, vjust = 1
+        axis.text.y = element_text(size=16),
+        legend.text = element_text(size=16),
+        legend.title = element_text(size = 18))
+ggsave(filename = "./results/plot/fig3-19.pdf",device = "pdf",width = 14,height = 6)
+
+```
+
+### 演化作用与动态性
+图3-20到图3-22
+```{r}
+rm(list=ls())
+gc()
+# dN/dS
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table$gene_id<-rownames(variant_table)
+evo_info<-read.table("./data/evo_info",header = TRUE)
+variant_table<-merge(variant_table,evo_info,by="gene_id")
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+variant_table<-subset(variant_table,variant_table$gene_id%in%rownames(expressed_detect))
+cor<-cor.test(variant_table$omega,variant_table$vst.variance.standardized,method = "spearman")
+ggplot(variant_table,mapping = aes(x = log2(omega), y = log2(vst.variance.standardized)))+geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  xlab("dn/ds (log2)")+
+  theme(axis.title.x=element_text(size=18),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  geom_smooth(method = "lm",colour="black")+
+  annotate("text", x=3.5, y=6, label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)),size=6)
+ggsave(filename = "./results/plot/fig3-20.pdf",device = "pdf",width = 5,height = 4.5)
+
+# 基因的表达动态性与表达时期的关系
+
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+fpkm<-fread("./data/fpkm") %>% as.data.frame()
+rownames(fpkm)=fpkm$V1
+fpkm<-fpkm[,-1]
+metadata<-read.csv("./data/metadata.csv",row.names = 1)
+metadata<-metadata[colnames(fpkm),]
+
+###median
+median_vairance_by_sample<-data.frame(sample_id=metadata$curr_SRX,simpled_dev=metadata$simpled_dev,
+                                    broad_stage=metadata$broad_stage,
+                                    median_variace=apply(fpkm, 2, function(x){median(na.omit(variant_table[rownames(fpkm)[which(x>1)],"vst.variance.standardized"]))}))
+plot_table <- median_vairance_by_sample%>%na.omit()%>%group_by(simpled_dev)%>%summarise(median = median(median_variace))%>%as.data.frame()
+#                                                        quantile50=quantile(mean_age)[3],
+#                                                         quantile75=quantile(mean_age)[4])
+plot_table<-merge(plot_table,unique(metadata[,c(5,6)]),by="simpled_dev")
+simpled_dev_levels<-c("unfertilized egg","activated egg","e1","e2","e3","e4","e5","e6","e7","e8","e11","e12","e13","e14","e15","e16","e17","l1","l2","l3","pu6","pu7","pu8","pu9","pu10","a0","a1","a2","a3","a4","a5","a6","a7","a8","a10","a11","a14","a20","a24","a25","a28","a42")
+plot_table<-subset(plot_table,plot_table$simpled_dev%in%simpled_dev_levels)
+rownames(plot_table)=plot_table$simpled_dev
+plot_table<-plot_table[simpled_dev_levels,]
+plot_table$simpled_dev[1]<-"egg0"
+plot_table$simpled_dev[2]<-"egg1"
+plot_table$simpled_dev<-factor(plot_table$simpled_dev,levels = plot_table$simpled_dev)
+cor<-cor.test(1:nrow(plot_table),plot_table$median,method = "spearman")
+ggplot(plot_table,mapping = aes(x = simpled_dev, y = median, group=1, color=broad_stage))+geom_line(size=1)+
+  theme_classic2()+
+  ylab("Standardized expression variation")+
+  labs(color = "Stage")+
+  scale_color_discrete(breaks = c('egg','embryo','larva','pupa',"adult"))+
+  theme(axis.title.x=element_blank(),
+        axis.text.x = element_text(size=15,angle = 60, hjust = 1, vjust = 1),
+        axis.text.y = element_text(size=15),
+        axis.title.y=element_text(size=17),
+        legend.text=element_text(size=15),
+        legend.title=element_text(size=17))+
+  geom_smooth(method = "lm",colour="black")+
+  annotate(geom="text", x=8, y=0.45, size=6,
+           label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)))
+ggsave(filename = "./results/plot/fig3-21.pdf",device = "pdf",width = 10,height = 6)
+
+# 器官的表达动态性
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+fpkm<-fread("./data/fpkm") %>% as.data.frame()
+rownames(fpkm)=fpkm$V1
+fpkm<-fpkm[,-1]
+metadata<-read.csv("./data/metadata.csv",row.names = 1)
+metadata<-metadata[colnames(fpkm),]
+median_vairance_by_sample<-data.frame(sample_id=metadata$curr_SRX,broad_tissue=metadata$broad_tissue,
+                                    broad_stage=metadata$broad_stage,
+                                    mean_variace=apply(fpkm, 2, function(x){median(na.omit(variant_table[rownames(fpkm)[which(x>1)],"vst.variance.standardized"]))}))
+plot_table<-median_vairance_by_sample%>%na.omit()%>%group_by(broad_stage,broad_tissue)%>%summarise(quantile25=quantile(mean_variace)[2],
+                                                                                                   quantile50=quantile(mean_variace)[3],
+                                                                                                   quantile75=quantile(mean_variace)[4])%>%as.data.frame()
+adult_tissue_plot_table<-subset(plot_table,plot_table$broad_stage=="adult")
+adult_tissue_plot_table<-adult_tissue_plot_table[order(adult_tissue_plot_table$quantile50),]
+adult_tissue_plot_table<-adult_tissue_plot_table[grep("carcass|multiple|abdomen|whole body",adult_tissue_plot_table$broad_tissue,invert = T),]
+adult_tissue_plot_table$broad_tissue<-factor(adult_tissue_plot_table$broad_tissue,levels = adult_tissue_plot_table$broad_tissue)
+
+ggplot(adult_tissue_plot_table, aes(x=broad_tissue, y=quantile50)) +
+  geom_segment(aes(y = quantile25,
+                   x = broad_tissue,
+                   yend = quantile75,
+                   xend = broad_tissue),
+               size=1,color = "gray") +
+  geom_point(aes(size=1),color="black",fill="black",stat='identity') +
+  xlab("")+
+  ylab("Standardized expression variation")+
+  theme_bw()+
+  theme(axis.text = element_text(size = 16),
+        text = element_text(size=18),
+        legend.text = element_text(size = 15),
+        legend.position = 'none',
+        axis.text.x = element_text(size = 16,angle = 60,hjust = 1))
+ggsave(filename = "./results/plot/fig3-22.pdf",device = "pdf",width = 8,height = 6)
+
+
+```
+
+### 调控保守性与表达动态性
+图3-23到图3-25
+```{r}
+rm(list = ls())
+gc()
+#promoter conservation
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table$gene_id<-rownames(variant_table)
+promoter_conservation<-read.table("./data/Dmel_BDGP_promoter_phylop_result",col.names = c("name","size","covered","sum","mean0","gene_mean_phylop"))[,c(1,6)]
+variant_table<-merge(variant_table,promoter_conservation,by.x="gene_id",by.y="name")
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+variant_table<-subset(variant_table,variant_table$gene_id%in%rownames(expressed_detect))
+variant_table<-variant_table[order(variant_table$vst.variance.standardized,decreasing = TRUE),]
+variant_table$group<-factor(c(rep(c(6,5,4,3,2),each=2756),rep(1,2755)),levels = c(1,2,3,4,5,6))
+
+df_p_val <- variant_table%>%
+  wilcox_test(formula = gene_mean_phylop ~ group) %>% 
+  add_significance(p.col = 'p',cutpoints = c(0,0.001,0.01,0.05,1),symbols = c('***','**','*','ns')) %>% 
+  add_xy_position()%>%
+  slice(1,6,10,13,15)%>%
+  mutate(y.position=c(2.95,2.7,2.5,2.35,2.2))
+cor<-cor.test(variant_table$gene_mean_phylop,variant_table$vst.variance.standardized,method = "spearman")
+ggplot(variant_table,mapping = aes(x = log2(gene_mean_phylop), y = log2(vst.variance.standardized)))+geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  xlim(c(-2.5,1.5))+
+  theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  xlab("Promoter conservation (phyloP, log2)")+
+  theme(axis.title.x=element_text(size=18),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  annotate("text", x=0.8, y=6.5, label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)),size=6)+
+  geom_smooth(method = "lm",colour="black")
+ggsave(filename = "./results/plot/fig3-23.pdf",device = "pdf",width = 5,height = 4.5)
+#phastcons
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table$gene_id<-rownames(variant_table)
+promoter_conservation<-read.table("/home/wangdy/sra/conservation/result/Dmel_BDGP_promoter_phastcons_result",col.names = c("name","size","covered","sum","mean0","gene_mean_phastcons"))[,c(1,6)]
+variant_table<-merge(variant_table,promoter_conservation,by.x="gene_id",by.y="name")
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+variant_table<-subset(variant_table,variant_table$gene_id%in%rownames(expressed_detect))
+variant_table<-variant_table[order(variant_table$vst.variance.standardized,decreasing = TRUE),]
+variant_table$group<-factor(c(rep(c(6,5,4,3,2),each=2756),rep(1,2755)),levels = c(1,2,3,4,5,6))
+
+df_p_val <- variant_table%>%
+  wilcox_test(formula = gene_mean_phastcons ~ group) %>% 
+  add_significance(p.col = 'p',cutpoints = c(0,0.001,0.01,0.05,1),symbols = c('***','**','*','ns')) %>% 
+  add_xy_position()%>%
+  slice(1,6,10,13,15)%>%
+  mutate(y.position=c(1,1,1,1,1))
+ggplot(variant_table,aes(x=group,y=gene_mean_phastcons))+geom_boxplot(aes(fill=group),outlier.alpha = 0, notch=TRUE)+
+  stat_pvalue_manual(data = df_p_val,label = '{p.adj}',label.size=4,tip.length = 0,bracket.shorten = 0.2)+
+  scale_fill_brewer(palette = "YlGnBu")+
+  #ylim(0,3)+
+  ylab("Promoter conservation (phastcons)")+
+  xlab("")+
+  theme_classic()+
+  theme(axis.title.x=element_text(size=18), 
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16),
+        legend.position = 'none')
+
+ggsave(filename = "./results/plot/004_m1_phastcons.pdf",device = "pdf",width = 5,height = 4.5)
+
+#TF counts diversity
+tf_bd_gene_id<-read.table("./data/tf_bd_gene_id",col.names = c("gene_id","tf_bd"))
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+expressed_variant<-variant_table[rownames(expressed_detect),]
+expressed_variant<-expressed_variant[order(expressed_variant$vst.variance.standardized,decreasing = TRUE),]
+expressed_variant$gene_id=rownames(expressed_variant)
+gene_tf_count<-tf_bd_gene_id%>%group_by(gene_id)%>%summarise(tf_n=length(tf_bd))
+gene_tf_type<-tf_bd_gene_id%>%group_by(gene_id)%>%summarise(type=length(unique(tf_bd)))%>%na.omit()
+expressed_variant<-merge(expressed_variant,gene_tf_count,by="gene_id")
+expressed_variant<-merge(expressed_variant,gene_tf_type,by="gene_id")
+expressed_variant<-expressed_variant[order(expressed_variant$vst.variance.standardized,decreasing = TRUE),]
+expressed_variant$group<-factor(c(rep(c(6,5,4,3,2,1),each=2726),rep(1,2)),levels = c(1,2,3,4,5,6))
+
+cor<-cor.test(expressed_variant$vst.variance.standardized,expressed_variant$tf_n,method = "spearman")
+ggplot(expressed_variant,mapping = aes(x = log2(tf_n), y = log2(vst.variance.standardized)))+geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  xlab("TF counts (log2)")+
+  theme(axis.title.x=element_text(size=18),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  annotate("text", x=7, y=6.5, label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)),size=6)+
+  geom_smooth(method = "lm",colour="black")
+ggsave(filename = "./results/plot/fig3-24A.pdf",device = "pdf",width = 5,height = 4.5)
+
+cor<-cor.test(expressed_variant$vst.variance.standardized,expressed_variant$type,method = "spearman")
+ggplot(expressed_variant,mapping = aes(x = log2(type), y = log2(vst.variance.standardized)))+geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  xlab("TF diversity (log2)")+
+  theme(axis.title.x=element_text(size=18),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  annotate("text", x=7, y=6.5, label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)),size=6)+
+  geom_smooth(method = "lm",colour="black")
+
+ggsave(filename = "./results/plot/fig3-24B.pdf",device = "pdf",width = 5,height = 4.5)
+
+#RNA tf bd dyversity
+tf_bd_gene_id<-read.table("./results/result_table/RNAbd_geneid",col.names = c("gene_id","tf_bd"))
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+expressed_variant<-variant_table[rownames(expressed_detect),]
+expressed_variant<-expressed_variant[order(expressed_variant$vst.variance.standardized,decreasing = TRUE),]
+expressed_variant$gene_id=rownames(expressed_variant)
+gene_tf_count<-tf_bd_gene_id%>%group_by(gene_id)%>%summarise(tf_n=length(tf_bd))
+gene_tf_type<-tf_bd_gene_id%>%group_by(gene_id)%>%summarise(type=length(unique(tf_bd)))%>%na.omit()
+expressed_variant<-merge(expressed_variant,gene_tf_count,by="gene_id")
+expressed_variant<-merge(expressed_variant,gene_tf_type,by="gene_id")
+expressed_variant<-expressed_variant[order(expressed_variant$vst.variance.standardized,decreasing = TRUE),]
+expressed_variant$group<-factor(c(rep(c(6,5,4,3,2,1),each=2711),1),levels = c(1,2,3,4,5,6))
+
+cor<-cor.test(expressed_variant$vst.variance.standardized,expressed_variant$tf_n,method = "spearman")
+ggplot(expressed_variant,mapping = aes(x = log2(tf_n), y = log2(vst.variance.standardized)))+geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  xlab("RBP counts (log2)")+
+  theme(axis.title.x=element_text(size=18),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  annotate("text", x=10, y=6.5, label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)),size=6)+
+  geom_smooth(method = "lm",colour="black")
+ggsave(filename = "./results/plot/fig3-25A.pdf",device = "pdf",width = 5,height = 4.5)
+
+cor<-cor.test(expressed_variant$vst.variance.standardized,expressed_variant$type,method = "spearman")
+ggplot(expressed_variant,mapping = aes(x = type, y = log2(vst.variance.standardized)))+geom_point(shape=21,size=1,color="#2F4F4F",fill="cadetblue1",alpha=0.2)+
+  theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  xlab("RBP diversity")+
+  theme(axis.title.x=element_text(size=18),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  annotate("text", x=180, y=6.5, label=paste0("rho = ",round(cor$estimate,2),",\n P = ",format(cor$p.value,2,scientific = TRUE,digits=3)),size=6)+
+  geom_smooth(method = "lm",colour="black")
+ggsave(filename = "./results/plot/fig3-25B.pdf",device = "pdf",width = 5,height = 4.5)
+```
+
+
+## 基因功能
+图3-26到图3-27
+```{r}
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table<-variant_table[order(variant_table$vst.variance.standardized,decreasing = TRUE),]
+fpkm<-fread("./data/fpkm")%>%as.data.frame()
+rownames(fpkm)=fpkm$V1
+fpkm<-fpkm[,-1]
+a<-as.data.frame(apply(fpkm, 1, function(x){sum(x>1)}))
+expressed_gene_id<-rownames(a)[a>2]
+variant_rank<-subset(variant_table,rownames(variant_table)%in%expressed_gene_id)
+varia_gene_id<-rownames(variant_rank)[1:(nrow(variant_rank)*0.05)]
+stable_gene_id<-tail(rownames(variant_rank),500)[1:(nrow(variant_rank)*0.05)]
+library(clusterProfiler)
+library(org.Dm.eg.db)
+gene.df <- bitr(varia_gene_id,fromType="ENSEMBL",toType="ENTREZID", OrgDb = org.Dm.eg.db)             
+gene <- gene.df$ENTREZID
+ego_ALL <- enrichGO(gene = gene,
+                    OrgDb=org.Dm.eg.db,
+                    keyType = "ENTREZID",
+                    ont = "ALL",#富集的GO类型
+                    pAdjustMethod = "BH",#这个不用管，一般都用的BH
+                    minGSSize = 1,
+                    pvalueCutoff = 0.05,#P值可以取0.05
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+ego_ALL <- as.data.frame(ego_ALL)
+BP<-ego_ALL[rownames(ego_ALL)[ego_ALL$ONTOLOGY=="BP"],]
+BP<-BP[order(BP$p.adjust)[1:10],]
+BP<-BP[order(BP$Count),]
+BP$Description<-factor(BP$Description,levels = BP$Description)
+ggplot(data = BP, # 绘图使用的数据
+       aes(x = Description ,y = Count))+ #横纵坐标及排序
+  geom_point(aes(size = Count,color = p.adjust))+ # 气泡大小及颜色设置
+  theme_bw()+ # 去除背景色
+  coord_flip()+
+  scale_colour_gradient(low = "red",high = "purple")+ # 设置气泡渐变色
+  labs(x = "", y = "")+ # 设置图例颜色及大小
+  theme(axis.title = element_text(size = 13),axis.text = element_text(size = 11),
+        plot.title = element_text(size = 14,hjust = 0.5,face = "bold"),
+        legend.title = element_text(size = 13),legend.text = element_text(size = 11),
+        plot.margin = unit(c(0.5,0.5,0.5,0.5),"cm"))
+ggsave(filename = "./results/plot/fig3-26.pdf",device = "pdf",width = 8,height = 4.5)
+
+
+gene.df <- bitr(stable_gene_id,fromType="ENSEMBL",toType="ENTREZID", OrgDb = org.Dm.eg.db)             
+gene <- gene.df$ENTREZID
+ego_ALL <- enrichGO(gene = gene,
+                    OrgDb=org.Dm.eg.db,
+                    keyType = "ENTREZID",
+                    ont = "ALL",#富集的GO类型
+                    pAdjustMethod = "BH",#这个不用管，一般都用的BH
+                    minGSSize = 1,
+                    pvalueCutoff = 0.05,#P值可以取0.05
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+ego_ALL <- as.data.frame(ego_ALL)
+BP<-ego_ALL[rownames(ego_ALL)[ego_ALL$ONTOLOGY=="BP"],]
+BP<-BP[order(BP$p.adjust)[1:10],]
+BP<-BP[order(BP$Count),]
+BP$Description<-factor(BP$Description,levels = BP$Description)
+ggplot(data = BP, # 绘图使用的数据
+       aes(x = Description ,y = Count))+ #横纵坐标及排序
+  geom_point(aes(size = Count,color = p.adjust))+ # 气泡大小及颜色设置
+  theme_bw()+ # 去除背景色
+  coord_flip()+
+  scale_colour_gradient(low = "red",high = "purple")+ # 设置气泡渐变色
+  labs(x = "", y = "")+ # 设置图例颜色及大小
+  theme(axis.title = element_text(size = 13),axis.text = element_text(size = 11),
+        plot.title = element_text(size = 14,hjust = 0.5,face = "bold"),
+        legend.title = element_text(size = 13),legend.text = element_text(size = 11),
+        plot.margin = unit(c(0.5,0.5,0.5,0.5),"cm"))
+ggsave(filename = "./results/plot/fig3-27.pdf",device = "pdf",width = 8,height = 4.5)
+
+
+
+
+```
+
+
+## 基因重要性
+图3-28
+```{r}
+rm(list = ls())
+gc()
+#gene essential
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table$gene_id<-rownames(variant_table)
+type_length_table<-read.table("./data/type_length_table")
+variance_type<-merge(variant_table,type_length_table,by="gene_id")
+essential_table<-read.csv("./elife-53865-supp2-v2.csv")
+plot_table<-merge(variance_type,essential_table,by.x="gene_id",by.y="FBgn")
+colnames(plot_table)[11]="phenotype"
+my_comparisons = list(c("Lethal","Semi-lethal"),c("Viable","Semi-lethal"),c("Lethal","Viable"))
+plot_table$phenotype<-factor(plot_table$phenotype,levels = c("Lethal","Semi-lethal","Viable"))
+ggplot(plot_table,aes(phenotype,log2(vst.variance.standardized+0.01),fill=phenotype))+
+  geom_boxplot()+
+  theme_classic()+
+  ylab("Standardized expression variation")+
+  #guides(fill=guide_legend(title = "gene type"))+
+  xlab("")+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_text(size=18),
+        axis.text.x = element_text(size=16,angle = 45, hjust = 1, vjust = 1),
+        axis.text.y = element_text(size=16))+
+  # scale_fill_manual(values = c("#EE1F26","#862461","#61439A","#4F69B5"))+
+  # scale_fill_manual(values = c("#C1C2E2","#8CB78D","#525252"))+
+  # scale_fill_manual(values =c("#d95f0d","#fc9272","#9ecae1")) +
+  stat_compare_means(comparisons = my_comparisons,label.y = c(9,10,11),size=4.0)+
+  theme(legend.position = 'none')
+ggsave(filename = "./results/plot/fig3-28A.pdf",device = "pdf",width = 4,height = 5)
+
+essential<-read.csv("./data/1-s2.0-S2001037019305628-mmc3.csv",header = TRUE)[-1,c(1,5)]
+colnames(essential)=c("gene_id","class")
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table$gene_id=rownames(variant_table)
+variant_table[essential$gene_id,"class"]="Essential"
+variant_table[grep("E",variant_table$class,invert = TRUE),"class"]="Non-Essential"
+expressed_detect<-read.table("./results/result_table/expressed_detect")
+variant_table<-subset(variant_table,variant_table$gene_id%in%rownames(expressed_detect))
+my_comparisons = list(c("Essential","Non-Essential"))
+ggplot(variant_table,aes(x=class,y=log2(vst.variance.standardized),fill=class))+geom_boxplot()+
+  stat_compare_means(comparisons = my_comparisons,size=5)+theme_bw()+
+  ylab("Standardized expression variation (log2)")+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16),
+        axis.text.y = element_text(size=16))+
+  theme(legend.position = 'none')
+ggsave(filename = "./results/plot/fig3-28B.pdf",device = "pdf",width = 4,height = 5)
+
+
+```
+
+## 动态lncRNA
+图3-30到图3-31
+```{r}
+library(Hmisc)
+library(dplyr)
+library(data.table)
+rm(list = ls())
+gc()
+exp = fread("./data/debatched_fpkm") %>% as.data.frame()
+row.names(exp) = exp$V1
+exp =exp[,-1]
+exp = exp[apply(exp, 1, function(x)sum(x>1)>= 2),]
+exp = exp[apply(exp, 2, function(x)sum(x>1)>= 5000),]
+#exp %<>% dplyr::select(.,!starts_with("Testis")) # exclude testis sample
+gene_type<-read.table("./data/type_length_table")
+exp$type <- gene_type[match(row.names(exp),gene_type$gene_id),"gene_type"]
+coding = dplyr::filter(exp,grepl("protein-coding",type,ignore.case = T)) %>% dplyr::select(.,-type)
+coding1 = coding[apply(coding, 1, function(x)sum(x > 0.1) >=5),]
+
+variant_table<-read.table("./results/result_table/seurat_variant_table")
+variant_table<-variant_table%>%filter(.,rownames(variant_table)%in%rownames(exp))
+variant_table$type<-gene_type[match(rownames(variant_table),gene_type$gene_id),"gene_type"]
+lnc_variant_table<-variant_table%>%filter(.,grepl("lncRNA",type,ignore.case = T))%>%arrange(.,desc(vst.variance.standardized))
+dynamic_lnc<-head(lnc_variant_table,round(nrow(lnc_variant_table)*0.05))
+constraint_lnc<-tail(lnc_variant_table,round(nrow(lnc_variant_table)*0.05))
+dynamic_lnc_fpkm<-exp[rownames(dynamic_lnc),-12050]
+constraint_lnc_fpkm<-exp[rownames(constraint_lnc),-12050]
+
+dynamic_lnc_fpkm = dynamic_lnc_fpkm[apply(dynamic_lnc_fpkm, 1, function(x)sum(x > 0.1) >=5),]
+constraint_lnc_fpkm = constraint_lnc_fpkm[apply(constraint_lnc_fpkm, 1, function(x)sum(x > 0.1) >=5),]
+merge_dat_dy <- cbind(t(coding1), t(dynamic_lnc_fpkm))
+merge_dat_cs <- cbind(t(coding1), t(constraint_lnc_fpkm))
+
+#dy  计算相关性非常慢，因此提前保存了表格
+# cc_dy<- rcorr(merge_dat_dy, type="pearson") # 这个运行太慢了
+# trans <- function(object){
+#   pvalue = object[,!(colnames(object) %in% rownames(dynamic_lnc_fpkm))]
+#   pvalue = pvalue[rownames(object) %in% rownames(dynamic_lnc_fpkm),]
+#   result = data.frame(lnc = rep(rownames(pvalue), ncol(pvalue)),
+#                       mRNA = rep(colnames(pvalue), each = nrow(pvalue)),
+#                       values = matrix(pvalue, ncol = 1)[,1])
+#   return(result)
+# }
+# PVALUE <- trans(cc_dy$P)
+# Correlation <- trans(cc_dy$r)
+# PVALUE$ID<- paste(PVALUE$lnc,PVALUE$mRNA,sep = "_")
+# Correlation$ID<- paste(Correlation$lnc,Correlation$mRNA,sep = "_")
+# if (all(Correlation$ID == PVALUE$ID)) {
+#   Pair<- cbind(Correlation,PVALUE)
+# }
+# Pair = Pair[,c(1,2,3,7)]
+# colnames(Pair) = c("lnc","coding","R","Pvalue")
+# fwrite(Pair,file = "./results/result_table/dylnc_coding_pair",nThread = 5)
+# 
+# #cs
+# cc_cs<- rcorr(merge_dat_cs, type="pearson")
+# trans <- function(object){
+#   pvalue = object[,!(colnames(object) %in% rownames(constraint_lnc_fpkm))]
+#   pvalue = pvalue[rownames(object) %in% rownames(constraint_lnc_fpkm),]
+#   result = data.frame(lnc = rep(rownames(pvalue), ncol(pvalue)),
+#                       mRNA = rep(colnames(pvalue), each = nrow(pvalue)),
+#                       values = matrix(pvalue, ncol = 1)[,1])
+#   return(result)
+# }
+# PVALUE <- trans(cc_cs$P)
+# Correlation <- trans(cc_cs$r)
+# PVALUE$ID<- paste(PVALUE$lnc,PVALUE$mRNA,sep = "_")
+# Correlation$ID<- paste(Correlation$lnc,Correlation$mRNA,sep = "_")
+# if (all(Correlation$ID == PVALUE$ID)) {
+#   Pair<- cbind(Correlation,PVALUE)
+# }
+# Pair = Pair[,c(1,2,3,7)]
+# colnames(Pair) = c("lnc","coding","R","Pvalue")
+# fwrite(Pair,file = "./results/result_table/dylnc_coding_pair",nThread = 5)
+rm(list = ls())
+gc()
+dylnc_coding_pair = fread("./results/result_table/dylnc_coding_pair") %>% as.data.frame()
+cslnc_coding_pair = fread("./results/result_table/cs_lnc_coding_pair") %>% as.data.frame()
+dylnc_coding_pair<-dylnc_coding_pair%>%filter(.,Pvalue<0.01)%>%filter(.,R>0.65)
+cslnc_coding_pair<-cslnc_coding_pair%>%filter(.,Pvalue<0.01)%>%filter(.,R>0.65)
+
+library(clusterProfiler)
+library(org.Dm.eg.db)
+gene.df <- bitr(unique(dylnc_coding_pair$coding),fromType="ENSEMBL",toType="ENTREZID", OrgDb = org.Dm.eg.db)                   
+gene <- gene.df$ENTREZID
+ego_ALL <- enrichGO(gene = gene,
+                    OrgDb=org.Dm.eg.db,
+                    keyType = "ENTREZID",
+                    ont = "ALL",#富集的GO类型
+                    pAdjustMethod = "BH",#这个不用管，一般都用的BH
+                    minGSSize = 1,
+                    pvalueCutoff = 0.05,#P值可以取0.05
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+ego_ALL <- as.data.frame(ego_ALL)
+dy_BP<-ego_ALL[rownames(ego_ALL)[ego_ALL$ONTOLOGY=="BP"],]
+
+dy_BP<-dy_BP[order(dy_BP$p.adjust)[1:10],]
+dy_BP<-dy_BP[order(dy_BP$Count),]
+dy_BP$Description<-factor(dy_BP$Description,levels = dy_BP$Description)
+ggplot(data = dy_BP, # 绘图使用的数据
+       aes(x = Description ,y = Count))+ #横纵坐标及排序
+  geom_point(aes(size = Count,color = p.adjust))+ # 气泡大小及颜色设置
+  theme_bw()+ # 去除背景色
+  coord_flip()+
+  scale_colour_gradient(low = "red",high = "purple")+ # 设置气泡渐变色
+  labs(x = "", y = "")+ # 设置图例颜色及大小
+  theme(axis.title = element_text(size = 13),axis.text = element_text(size = 11),
+        plot.title = element_text(size = 14,hjust = 0.5,face = "bold"),
+        legend.title = element_text(size = 13),legend.text = element_text(size = 11),
+        plot.margin = unit(c(0.5,0.5,0.5,0.5),"cm"))
+ggsave(filename = "./results/plot/fig3-30.pdf",device = "pdf",width = 8,height = 4.5)
+##############
+
+gene.df <- bitr(unique(cslnc_coding_pair$coding),fromType="ENSEMBL",toType="ENTREZID", OrgDb = org.Dm.eg.db)                   
+gene <- gene.df$ENTREZID
+ego_ALL <- enrichGO(gene = gene,
+                    OrgDb=org.Dm.eg.db,
+                    keyType = "ENTREZID",
+                    ont = "ALL",#富集的GO类型
+                    pAdjustMethod = "BH",#这个不用管，一般都用的BH
+                    minGSSize = 1,
+                    pvalueCutoff = 0.05,#P值可以取0.05
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+ego_ALL <- as.data.frame(ego_ALL)
+cs_BP<-ego_ALL[rownames(ego_ALL)[ego_ALL$ONTOLOGY=="BP"],]
+
+cs_BP<-cs_BP[order(cs_BP$p.adjust)[1:10],]
+cs_BP<-cs_BP[order(cs_BP$Count),]
+cs_BP$Description<-factor(cs_BP$Description,levels = cs_BP$Description)
+ggplot(data = cs_BP, # 绘图使用的数据
+       aes(x = Description ,y = Count))+ #横纵坐标及排序
+  geom_point(aes(size = Count,color = p.adjust))+ # 气泡大小及颜色设置
+  theme_bw()+ # 去除背景色
+  coord_flip()+
+  scale_colour_gradient(low = "red",high = "purple")+ # 设置气泡渐变色
+  labs(x = "", y = "")+ # 设置图例颜色及大小
+  theme(axis.title = element_text(size = 13),axis.text = element_text(size = 11),
+        plot.title = element_text(size = 14,hjust = 0.5,face = "bold"),
+        legend.title = element_text(size = 13),legend.text = element_text(size = 11),
+        plot.margin = unit(c(0.5,0.5,0.5,0.5),"cm"))
+ggsave(filename = "./results/plot/fig3-31.pdf",device = "pdf",width = 8,height = 4.5)
+
+```
+
+## 与人同源基因保守性
+图3-32
+```{r}
+human_fly_homolog<-read.csv("./data/mart_export.txt",sep = ",",header = TRUE)
+essential_gene_info<-read.csv("./data/Phenotypic.classes.csv",header = TRUE,row.names = 1)
+human_fly_homolog[human_fly_homolog==""]<-NA
+human_fly_homolog<-human_fly_homolog[which(is.na(human_fly_homolog$Drosophila.melanogaster.gene.stable.ID)==FALSE),]
+human_fly_essential<-merge(human_fly_homolog,essential_gene_info,by.x="Gene.stable.ID",by.y="Human_ID",all.y=TRUE)
+human_essential<-unique(human_fly_essential[,c(1,5,8)])
+human_essential[which(is.na(human_essential$Drosophila.melanogaster.homology.type)),"Drosophila.melanogaster.homology.type"]="no_homolog"
+
+plot_table<-human_essential%>%group_by(Pheno_class,Drosophila.melanogaster.homology.type)%>%
+  summarise(n=length(Gene.stable.ID))
+sum<-plot_table%>%group_by(Pheno_class)%>%summarise(sum=sum(n))
+plot_table<-merge(plot_table,sum,by="Pheno_class")
+plot_table$percent=plot_table$n/plot_table$sum
+plot_table$diff=plot_table$sum-plot_table$n
+library(scales)
+for (i in 1:nrow(plot_table)) {
+  pheno<-plot_table[i,"Pheno_class"]
+  homo_type<-plot_table[i,"Drosophila.melanogaster.homology.type"]
+  temp<-plot_table%>%filter(.,Pheno_class!=pheno)%>%filter(.,Drosophila.melanogaster.homology.type==homo_type)
+  plot_table[i,"n"]
+  test<-fisher.test(matrix(c(plot_table[i,"n"],plot_table[i,"diff"],sum(temp$n),sum(temp$diff)),nrow = 2))
+  plot_table[i,"pvalue"]=ifelse(test$p.value<0.05,ifelse(test$p.value<0.01,ifelse(test$p.value<0.001,"***","** "),"*  "),"   ")
+  plot_table[i,"or"]=test$estimate
+}
+plot_table$label<-paste(percent(plot_table$percent,accuracy = 0.01),plot_table$pvalue,sep = " ")
+plot_table[grep("0Lethal",plot_table$Pheno_class),"Pheno_class"]="Vital genes"
+plot_table[grep("1Lethal_disease",plot_table$Pheno_class),"Pheno_class"]="vital & disease-\nsuppressing genes"
+plot_table[grep("2Disease",plot_table$Pheno_class),"Pheno_class"]="Disease-suppressing\n genes"
+plot_table[grep("3OtherGenes",plot_table$Pheno_class),"Pheno_class"]="Other genes"
+plot_table[grep("no_homolog",plot_table$Drosophila.melanogaster.homology.type),"Drosophila.melanogaster.homology.type"]="No homolog"
+plot_table[grep("ortholog_many2many",plot_table$Drosophila.melanogaster.homology.type),"Drosophila.melanogaster.homology.type"]="Many2many"
+plot_table[grep("ortholog_one2many",plot_table$Drosophila.melanogaster.homology.type),"Drosophila.melanogaster.homology.type"]="One2many"
+plot_table[grep("ortholog_one2one",plot_table$Drosophila.melanogaster.homology.type),"Drosophila.melanogaster.homology.type"]="One2one"
+plot_table$Drosophila.melanogaster.homology.type=factor(plot_table$Drosophila.melanogaster.homology.type,levels = c("No homolog","Many2many","One2many","One2one"))
+plot_table$Pheno_class<-factor(plot_table$Pheno_class,levels = c("Vital genes","vital & disease-\nsuppressing genes","Disease-suppressing\n genes","Other genes"))
+ggplot(plot_table,aes(x=Pheno_class,y=percent,fill=Drosophila.melanogaster.homology.type))+
+  geom_bar(stat = "identity")+geom_text(label=plot_table$label,position=position_stack(1), vjust=1.2,size=4)+
+  theme_bw()+
+  xlab("")+
+  ylab("Proportion")+
+  labs(fill="Homology type")+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_text(size=16),
+        axis.text.x = element_text(size=16,angle=45,hjust = 1),
+        axis.text.y = element_text(size=16),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 14))+
+  scale_fill_manual(values = c("#A9A9A9","#A9BAE5","#BAE5A9","#e5a9ba"))
+ggsave(filename = "./results/plot/fig3-32.pdf",device = "pdf",width = 7,height = 5)
+
+
+```
+
+## 与人同源基因表达保守性
+
+图3-33 rmd for循环输出的图好像不输出
+```{r}
+rm(list = ls())
+gc()
+#####read in files
+metadata<-read.csv("./data/metadata.csv")
+debatched_fpkm<-fread("./data/debatched_fpkm") %>% as.data.frame()
+rownames(debatched_fpkm)=debatched_fpkm[,1]
+debatched_fpkm<-debatched_fpkm[,-1]
+# table(metadata$broad_stage,metadata$broad_tissue)
+human_fly_homolog<-read.csv("./data/mart_export.txt",sep = ",",header = TRUE)[,c(1,6,5)]
+human_fly_one2one<-unique(subset(human_fly_homolog,human_fly_homolog$Drosophila.melanogaster.homology.type=="ortholog_one2one"))
+
+#####human
+human_all_fpkm<-read.table("/home/qians/MamDC/Data/Seqdata/WangKuster2019MSBRNAseq/Human.allgene.fpkm.txt")
+tissue_info<-data.frame(human_sample=colnames(human_all_fpkm))
+tissue_info$human_tissue<-gsub("_rep.","",tissue_info$human_sample)
+human_median_fpkm<-t(apply(human_all_fpkm, 1, function(x){tapply(x, tissue_info$human_tissue, median)}))
+human_fly_tissue<-read.csv("./data/human_fly_tissue.csv")
+human_co_fpkm<-as.data.frame(human_median_fpkm[,human_fly_tissue$human])
+
+#####fly
+metadata$broad_tissue<-gsub("_"," ",metadata$broad_tissue)
+fly_all_meta<-subset(metadata,metadata$broad_tissue%in%human_fly_tissue$fly&metadata$broad_stage=="adult")
+fly_all_fpkm<-debatched_fpkm[,fly_all_meta$curr_SRX]
+fly_median_fpkm<-t(apply(fly_all_fpkm, 1, function(x){tapply(x, fly_all_meta$broad_tissue, median)}))
+fly_co_fpkm<-as.data.frame(fly_median_fpkm[,unique(human_fly_tissue$fly)])
+
+#####correlation
+human_fly_one2one<-subset(human_fly_one2one,human_fly_one2one$Gene.stable.ID%in%rownames(human_co_fpkm)&human_fly_one2one$Drosophila.melanogaster.gene.stable.ID%in%rownames(fly_co_fpkm))
+human_co_fpkm<-human_co_fpkm[human_fly_one2one$Gene.stable.ID,]
+fly_co_fpkm<-fly_co_fpkm[human_fly_one2one$Drosophila.melanogaster.gene.stable.ID,]
+for (i in 1:nrow(human_fly_tissue)) {
+  human_expr<-human_co_fpkm[,human_fly_tissue[i,"human"]]
+  fly_expr<-fly_co_fpkm[,human_fly_tissue[i,"fly"]]
+  pearson<-cor.test(human_expr,fly_expr,method = "pearson")
+  spearman<-cor.test(human_expr,fly_expr,method = "spearman")
+  human_fly_tissue[i,"pearson-r"]=pearson$estimate
+  human_fly_tissue[i,"pearson-p"]=pearson$p.value
+  human_fly_tissue[i,"spearman-r"]=spearman$estimate
+  human_fly_tissue[i,"spearman-p"]=spearman$p.value
+}
+
+all_cor<-data.frame()
+for (i in unique(human_fly_tissue$human)) {
+  for(j in unique(human_fly_tissue$fly)){
+    all_cor[j,i]=cor.test(human_co_fpkm[,i],fly_co_fpkm[,j],method = "spearman")$estimate
+  }
+}
+
+# pheatmap::pheatmap(all_cor,display_numbers = TRUE)
+all_cor_pearson<-data.frame()
+for (i in unique(human_fly_tissue$human)) {
+  for(j in unique(human_fly_tissue$fly)){
+    all_cor_pearson[j,i]=cor.test(human_co_fpkm[,i],fly_co_fpkm[,j],method = "pearson")$estimate
+  }
+}
+phenotypic_class<-read.csv("./data/Phenotypic.classes.csv",row.names = 1,header = TRUE)
+for (i in 1:nrow(human_fly_tissue)) {
+  table<-data.frame(human=human_co_fpkm[,human_fly_tissue[i,"human"]],fly=fly_co_fpkm[,human_fly_tissue[i,"fly"]],human_id=rownames(human_co_fpkm))
+  table<-merge(table,phenotypic_class,by.x="human_id",by.y="Human_ID")
+  cor1<-cor.test(table[which(table$Pheno_class=="0Lethal"),"human"],table[which(table$Pheno_class=="0Lethal"),"fly"],method = "pearson")
+  cor2<-cor.test(table[which(table$Pheno_class=="1Lethal_disease"),"human"],table[which(table$Pheno_class=="1Lethal_disease"),"fly"],method = "pearson")
+  cor3<-cor.test(table[which(table$Pheno_class=="2Disease"),"human"],table[which(table$Pheno_class=="2Disease"),"fly"],method = "pearson")
+  cor4<-cor.test(table[which(table$Pheno_class=="3OtherGenes"),"human"],table[which(table$Pheno_class=="3OtherGenes"),"fly"],method = "pearson")
+  table[grep("0",table$Pheno_class),"Pheno_class"]="Vital genes"
+  table[grep("1",table$Pheno_class),"Pheno_class"]="Vital & disease-suppressing genes"
+  table[grep("2",table$Pheno_class),"Pheno_class"]="Disease-suppressing genes"
+  table[grep("3",table$Pheno_class),"Pheno_class"]="Other genes"
+  table$Pheno_class=factor(table$Pheno_class,levels = c("Vital genes","Vital & disease-suppressing genes","Disease-suppressing genes","Other genes"))
+  p1<-ggplot(table,mapping = aes(x = log2(human), y = log2(fly)))+geom_point(aes(color=Pheno_class),size=1,alpha=0.5)+
+    theme_bw()+
+    ylab(paste("human ",gsub("_"," ",human_fly_tissue[i,"human"]),sep = "- "))+
+    xlab(paste("fly ",gsub("_"," ",human_fly_tissue[i,"fly"]),sep = "- "))+
+    labs(color="Phenotypic class")+
+    theme(axis.text.x = element_text(size=15, hjust = 1, vjust = 1),
+          axis.text.y = element_text(size=15),
+          axis.title.x=element_text(size=17),
+          axis.title.y=element_text(size=17),
+          legend.text=element_text(size=15),
+          legend.title=element_text(size=17),
+          title = element_text(size = 17))+
+    geom_smooth(aes(color=Pheno_class),method = "lm")+
+    annotate(geom="text", x=-4, y=7.5, size=3,
+             label=paste0("rho1=",round(cor1$estimate,2),", P=",format(cor1$p.value,2,scientific = TRUE,digits=3),"\nrho2=",round(cor2$estimate,2),", P=",format(cor2$p.value,2,scientific = TRUE,digits=3),
+             "\nrho3=",round(cor3$estimate,2),", P=",format(cor3$p.value,2,scientific = TRUE,digits=3),"\nrho4=",round(cor4$estimate,2),", P=",format(cor4$p.value,2,scientific = TRUE,digits=3)))
+  plot(p1)
+    #labs(title = c("Pearson correlation"),subtitle = paste0("rho=",round(cor$estimate,2),", P=",format(cor$p.value,2,scientific = TRUE,digits=3)))
+  # ggsave(gsub(" ","_",paste("./results/plot/expr_cor/expr_cor_",human_fly_tissue[i,"human"],"-",human_fly_tissue[i,"fly"],".pdf",sep = "")),p1,device = "pdf",width = 8,height = 3.5)
+}
+
+
+
+```
+
+
+
+## 模型训练数据
+
+下面为python生成图，由于服务器限制，sramongo的数据储存在NIH的服务器中，而python的图像无法在Rmd中预览，因此主要作为核心代码的记录。
+
+果蝇数据提交数量统计图
+图3-2A
+```{python eval=FALSE, include=FALSE}
+"""Plot time vs number samples submitted."""
+import sys
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pymongo import MongoClient
+sys.path.insert(0, "../src")  # 导入自身环境包
+from ncbi_remap.plotting import style_use  # 导入样式
+
+
+def main():
+    # Data prep
+    df = get_submission_dates()
+
+    submission_by_year = (
+        df.resample("Y")
+        .size()
+        .rename("num_samples")
+        .to_frame()
+        .assign(cum_num_samples=lambda x: x.num_samples.cumsum())
+        .assign(year=lambda x: x.index.year.astype(str))
+        # had to use this for lmplot
+        .assign(idx=lambda x: range(x.shape[0]))
+    )
+
+    # Make plot
+    style_use(snakemake.params.get("style", "sra"))
+    plt.rcParams["figure.figsize"] = (2.636, 1.496)
+
+    _, ax = plt.subplots()  # type: plt.Figure, plt.Axes
+    ax2 = ax.twinx()
+
+    sns.lineplot("year", "cum_num_samples", data=submission_by_year, ax=ax)
+    sns.regplot("idx", "num_samples", data=submission_by_year, lowess=True, ax=ax2, color="C1")
+
+    # Add fill
+    ax.fill_between(submission_by_year.year, submission_by_year.cum_num_samples, color="C0")
+
+    # Clean up X-axis
+    ax.xaxis.set_major_locator(plt.MaxNLocator(4))
+    ax.set_xlabel("Submission Date")
+
+    # Clean up Y-Axis 1
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, pos: f"{y/1000:.0f}"))
+    ax.set_ylabel("Cumulative # Samples\n(Thousands)", color="C0")
+
+    # Clean up Y-Axis 2
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, pos: f"{y/1000:.0f}"))
+    ax2.set_ylabel("# Samples\n(Thousands)", color="C1")
+
+    # Remove spines
+    sns.despine(ax=ax, left=True, bottom=True)
+    sns.despine(ax=ax2, left=True, bottom=True)
+
+    plt.savefig(snakemake.output[0])
+
+
+def get_submission_dates():
+    try:
+        client = MongoClient()
+        db = client["sramongo"]
+        ncbi = db["ncbi"] # 从SraMongo提取
+
+        df = pd.DataFrame(
+            ncbi.aggregate(
+                [{"$project": {"_id": 0, "srx": 1, "submission_date": "$sra_create_date"}},]
+            )
+        )
+
+        df["submission_date"] = pd.to_datetime(df.submission_date)
+
+    finally:
+        client.close()
+
+    return df.set_index("submission_date")
+
+
+if __name__ == "__main__":
+
+    main()
+```
+
+## 特征重要性 
+
+图3-3A 特征重要性SHAP值计算
+```{python eval=FALSE, include=FALSE}
+"""Plot SHAP feature importance"""
+import sys
+
+import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+sys.path.insert(0, "../src")
+from ncbi_remap.plotting import style_use
+
+NAME_MAPPER = {
+    "percent_alignment": r"Reads Aligned (%)",
+    "percent_duplication": f"Duplicated Reads (%)",
+    "percent_genes_on": f"Gene Expressed (%)",
+    "number_junction_reads": r"Reads at Exon Junctions (#)",
+    "percent_utr_bases": r"UTR Bases (%)",
+    "gene_body_three_prime": "3' Gene Body Coverage (avg)",
+    "percent_intergenic_bases": r"Intergenic Bases (%)",
+    "percent_reverse": r"Reverse Oriented Reads (%)",
+    "number_genic_reads": "Genic Reads (#)",
+    "gene_body_middle": "Mid Gene Body Coverage (avg)",
+    "number_reads": "Total Reads (#)",
+    "median_cv_coverage": "Coef Var Coverage (median)",
+    "gene_body_five_prime": "5' Gene Body Coverage (avg)",
+    "percent_mrna_bases": r"mRNA Bases (%)",
+    "reads_MQ0": "Reads 0 Mapping Quality (#)",
+    "percent_rrna_reads": r"rRNA Reads (%)",
+    "number_junctions_on": "Exon Junctions Touched (#)",
+    "percent_intronic_bases": r"Intronic Bases (%)",
+    "number_multimapping_reads": "Multimapping Reads (#)",
+    "average_quality": "Quality Score (avg)",
+    "number_reads_too_short": "Reads Too Short (#)",
+}
+
+def main():
+    style_use("sra")
+    plt.rcParams["figure.figsize"] = 3.335, 3.430
+
+    iso = joblib.load(snakemake.input[0])  # type: SraIsolationForest
+    mean_shap, columns = iso.mean_shap_values_outliers
+    cols = [NAME_MAPPER[x] for x in columns]
+
+    _, ax = plt.subplots() # type: plt.Figure, plt.Axes
+    sns.barplot(mean_shap, cols, color="C0", ax=ax)
+    ax.set(xlabel="mean(|SHAP Value|)", ylabel="")
+
+    plt.savefig(snakemake.output[0])
+    
+
+
+if __name__ == "__main__":
+    if "snakemake" not in locals() or not hasattr(snakemake, "scriptdir"):
+        from ncbi_remap.mock import MockSnake
+
+        snakemake = MockSnake(
+            input="../../output/library_strategy-wf/isolation_forest.pkl"
+        )
+
+    main()
+```
+
+图3-3B SHAP值与特征关系
+```{python eval=FALSE, include=FALSE}
+"""Plot all SHAP scores."""
+import sys
+
+import joblib
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+sys.path.insert(0, "../src")
+from ncbi_remap.iforest import SraIsolationForest
+
+
+NAME_MAPPER = {
+    "percent_alignment": r"Reads Aligned (%)",
+    "percent_duplication": f"Duplicated Reads (%)",
+    "percent_genes_on": f"Gene Expressed (%)",
+    "number_junction_reads": r"Reads at Exon Junctions (#)",
+    "percent_utr_bases": r"UTR Bases (%)",
+    "gene_body_three_prime": "3' Gene Body Coverage (avg)",
+    "percent_intergenic_bases": r"Intergenic Bases (%)",
+    "percent_reverse": r"Reverse Oriented Reads (%)",
+    "number_genic_reads": "Genic Reads (#)",
+    "gene_body_middle": "Mid Gene Body Coverage (avg)",
+    "number_reads": "Total Reads (#)",
+    "median_cv_coverage": "Coef Var Coverage (median)",
+    "gene_body_five_prime": "5' Gene Body Coverage (avg)",
+    "percent_mrna_bases": r"mRNA Bases (%)",
+    "reads_MQ0": "Reads 0 Mapping Quality (#)",
+    "percent_rrna_reads": r"rRNA Reads (%)",
+    "number_junctions_on": "Exon Junctions Touched (#)",
+    "percent_intronic_bases": r"Intronic Bases (%)",
+    "number_multimapping_reads": "Multimapping Reads (#)",
+    "average_quality": "Quality Score (avg)",
+    "number_reads_too_short": "Reads Too Short (#)",
+}
+
+
+def main():
+    iso = joblib.load(snakemake.input[0])  # type: SraIsolationForest
+    df = get_features_w_shap(iso)
+    df_w_flags = add_outliers(df, iso)
+
+    g = sns.FacetGrid(
+        df_w_flags,
+        col="feature",
+        col_wrap=4,
+        hue="RNA-Seq Outlier",
+        hue_order=[False, True],
+        palette=["C0", "C3"],
+        sharex=False,
+        sharey=False,
+    )
+    g.map(sns.scatterplot, "feature_score", "shap_value", s=20, rasterized=True)
+    g.set_titles("{col_name}")
+
+    g.savefig(snakemake.output[0])
+
+
+def get_features_w_shap(iso):
+    features = iso.X_test
+    shap_values = pd.DataFrame(iso.shap_values, index=features.index, columns=features.columns)
+
+    # melt for seaborn compatability
+    features_melt = features.reset_index().melt(
+        id_vars="srx", var_name="feature", value_name="feature_score"
+    )
+    shap_values_melt = shap_values.reset_index().melt(
+        id_vars="srx", var_name="feature", value_name="shap_value"
+    )
+
+    return features_melt.merge(shap_values_melt, on=["srx", "feature"]).replace(NAME_MAPPER)
+
+
+def add_outliers(df, iso):
+    outlier_srx = iso.outliers_test.index
+    df["RNA-Seq Outlier"] = False
+    df.loc[df.srx.isin(outlier_srx), "RNA-Seq Outlier"] = True
+    return df
+
+
+if __name__ == "__main__":
+    if "snakemake" not in locals() or not hasattr(snakemake, "scriptdir"):
+        from ncbi_remap.mock import MockSnake
+
+        snakemake = MockSnake(input="../../output/library_strategy-wf/isolation_forest.pkl",)
+
+    main()
+```
+
+图3-4 特征关联
+```{python eval=FALSE, include=FALSE}
+"""Plot pairwise feature panels
+
+Each feature will have its own figure with all pairwise comparisons.
+"""
+import sys
+from itertools import permutations
+
+import joblib
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+sys.path.insert(0, "../src")
+from ncbi_remap.iforest import SraIsolationForest
+
+
+NAME_MAPPER = {
+    "percent_alignment": r"Reads Aligned (%)",
+    "percent_duplication": f"Duplicated Reads (%)",
+    "percent_genes_on": f"Gene Expressed (%)",
+    "number_junction_reads": r"Reads at Exon Junctions (#)",
+    "percent_utr_bases": r"UTR Bases (%)",
+    "gene_body_three_prime": "3' Gene Body Coverage (avg)",
+    "percent_intergenic_bases": r"Intergenic Bases (%)",
+    "percent_reverse": r"Reverse Oriented Reads (%)",
+    "number_genic_reads": "Genic Reads (#)",
+    "gene_body_middle": "Mid Gene Body Coverage (avg)",
+    "number_reads": "Total Reads (#)",
+    "median_cv_coverage": "Coef Var Coverage (median)",
+    "gene_body_five_prime": "5' Gene Body Coverage (avg)",
+    "percent_mrna_bases": r"mRNA Bases (%)",
+    "reads_MQ0": "Reads 0 Mapping Quality (#)",
+    "percent_rrna_reads": r"rRNA Reads (%)",
+    "number_junctions_on": "Exon Junctions Touched (#)",
+    "percent_intronic_bases": r"Intronic Bases (%)",
+    "number_multimapping_reads": "Multimapping Reads (#)",
+    "average_quality": "Quality Score (avg)",
+    "number_reads_too_short": "Reads Too Short (#)",
+}
+
+
+def main():
+    iso = joblib.load(snakemake.input[0])  # type: SraIsolationForest
+    features = iso.X_test.rename(columns=NAME_MAPPER)
+    for feature, file_name in zip(features.columns, snakemake.output):
+        df = get_subset(feature, features)
+        df_w_flag = add_outliers(df, iso)
+        g = sns.FacetGrid(
+            df_w_flag,
+            col="feature",
+            col_wrap=4,
+            sharex=True,
+            sharey=False,
+            hue="RNA-Seq Outlier",
+            hue_order=[False, True],
+            palette=["C0", "C3"],
+        )
+        g.map(sns.scatterplot, feature, "score", s=20, rasterized=True)
+        g.set_titles("{col_name}")
+        g.savefig(file_name)
+        plt.suptitle(feature)
+        plt.close()
+
+
+def get_subset(feature, features):
+    _df = features.copy()
+    target = _df.pop(feature)
+    melted = _df.reset_index().melt(id_vars="srx", var_name="feature", value_name="score")
+    return melted.merge(target, on="srx")
+
+
+def add_outliers(df, iso):
+    outlier_srxs = iso.outliers_test.index
+    df["RNA-Seq Outlier"] = False
+    df.loc[df.srx.isin(outlier_srxs), "RNA-Seq Outlier"] = True
+    return df
+
+
+if __name__ == "__main__":
+    if "snakemake" not in locals() or not hasattr(snakemake, "scriptdir"):
+        from ncbi_remap.mock import MockSnake
+
+        snakemake = MockSnake(
+            input="../../output/library_strategy-wf/isolation_forest.pkl", output=[],
+        )
+
+    main()
+```
+
+## 模型准确性
+
+图3-5A UMAP聚类
+```{python eval=FALSE, include=FALSE}
+"""Plot the UMAP panel for library strategy"""
+import sys
+
+import pandas as pd
+import joblib
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import seaborn as sns
+
+sys.path.insert(0, "../src")
+from ncbi_remap.plotting import style_use
+
+CATEGORIES = ["RNA-Seq", "RNA-Seq Outlier", "EST", "WGS", "ChIP-Seq", "Other"]
+COLORS = ["C0", "C3", "C1", "C2", "C4", "lightgray"]
+ZORDERS = [4, 5, 3, 2, 1, 0]
+MARKERS = ["o", "^", "o", "o", "o", "o"]
+
+
+def main():
+    labels = get_labels()
+    umap = pd.read_parquet(snakemake.input.umap).join(labels)
+
+    style_use("sra")
+    plt.rcParams["figure.figsize"] = (3.335, 2.509)
+
+    _, ax = plt.subplots() # type: plt.Figure, plt.Axes
+    grps = umap.groupby("library_strategy")
+    for strategy, color, marker, zorder in zip(CATEGORIES, COLORS, MARKERS, ZORDERS):
+        _df = grps.get_group(strategy)
+        ax.scatter(
+            _df.UMAP1,
+            _df.UMAP2,
+            color=color,
+            marker=marker,
+            label=strategy,
+            zorder=zorder,
+            rasterized=True,
+            **snakemake.params[0]
+        )
+    ax.set(xlabel="UMAP 1", ylabel="UMAP 2", yticks=[-10, 0], xticks=[-10, 0, 10])
+    sns.despine(ax=ax, left=True, bottom=True)
+    plt.legend(loc="upper left", bbox_to_anchor=(-.1, 1))
+    # ax.xaxis.set_major_locator(plt.MaxNLocator(4))
+    # ax.yaxis.set_major_locator(plt.MaxNLocator(4))
+
+    plt.savefig(snakemake.output[0])
+
+
+def get_labels():
+    labels = pd.read_parquet(snakemake.input.labels).library_strategy.squeeze()
+
+    # Focus on a subset of library strategies.
+    labels[~labels.isin(CATEGORIES)] = "Other"
+
+    # Flag outliers
+    iso = joblib.load(snakemake.input.iso)  # type: SraIsolationForest
+    labels[labels.index.isin(iso.outliers_all.index)] = "RNA-Seq Outlier"
+
+    return labels
+
+
+if __name__ == "__main__":
+    if "snakemake" not in locals() or not hasattr(snakemake, "scriptdir"):
+        from ncbi_remap.mock import MockSnake
+
+        snakemake = MockSnake(
+            input=dict(
+                umap="../../output/library_strategy-wf/umap_prealn_features.parquet",
+                iso="../../output/library_strategy-wf/isolation_forest.pkl",
+                labels="../../output/library_strategy-wf/sra_strategy_selection.parquet",
+            ),
+        )
+
+    main()
+```
+
+图3-5B 污染数据测试
+
+```{python eval=FALSE, include=FALSE}
+"""Plot Mixin Experiment Results"""
+import sys
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+import seaborn as sns
+
+sys.path.insert(0, "../src")
+from ncbi_remap.plotting import style_use
+
+STRATEGIES = ["EST", "WGS", "ChIP-Seq"]
+COLORS = ["C1", "C2", "C4"]
+
+def main():
+    style_use("sra")
+    plt.rcParams["figure.figsize"] = 3.335, 2.509
+
+    mixin = (
+        pd.read_parquet(snakemake.input[0])
+        .set_index(["Prop Contamination", "Contamination Source"])
+        .unstack()
+    )
+    mixin.columns = mixin.columns.droplevel()
+
+    ax = mixin[STRATEGIES].plot(
+        marker="o", color=["C1", "C2", "C4"], legend=False
+    )  # type: plt.Axes
+    ax.set(xlabel="Contamination (prop)", ylabel="Outliers (prop)", yticks=[0.2, .4, .6, .8])
+    add_legend(ax)
+    # sns.despine(ax=ax, left=True, bottom=True)
+
+    plt.savefig(snakemake.output[0])
+
+def add_legend(ax):
+    legend_elements = [
+        Line2D(
+            [0], [0], marker="o", markersize=3, color=color, label=strategy, markerfacecolor=color, linestyle=""
+        )
+        for strategy, color in zip(STRATEGIES, COLORS)
+    ]
+
+    ax.legend(
+        handles=legend_elements,
+        loc="upper left",
+        # bbox_to_anchor=(0, 0.8, 0.1, 0.1),
+        # bbox_transform=ax.transAxes,
+    )
+
+
+
+
+if __name__ == "__main__":
+    if "snakemake" not in locals() or not hasattr(snakemake, "scriptdir"):
+        from ncbi_remap.mock import MockSnake
+
+        snakemake = MockSnake(input="../../output/library_strategy-wf/contamination_mixin.parquet")
+
+    main()
+```
+
